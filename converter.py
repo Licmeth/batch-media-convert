@@ -617,6 +617,124 @@ def process_conversions(
     return result
 
 
+def review_results(conversion_results: List[Tuple[Path, Dict[str, Any], Dict[str, Any]]]) -> None:
+    """
+    Review conversion results and allow user to delete original or converted files.
+    
+    Args:
+        conversion_results: List of tuples containing (original_path, original_info, conversion_info)
+    """
+    # Filter only successful conversions
+    successful_conversions = [
+        (orig_path, orig_info, conv_info) 
+        for orig_path, orig_info, conv_info in conversion_results 
+        if conv_info.get('status') == 'success'
+    ]
+    
+    if not successful_conversions:
+        print("\nNo successful conversions to review.")
+        return
+    
+    print("\n" + "=" * 80)
+    print("CONVERSION REVIEW")
+    print("=" * 80)
+    print(f"\nReviewing {len(successful_conversions)} successfully converted file(s).\n")
+    
+    for idx, (original_path, original_info, conversion_info) in enumerate(successful_conversions, 1):
+        converted_path = Path(conversion_info['path'])
+        
+        print("=" * 80)
+        print(f"\n[{idx}/{len(successful_conversions)}] Conversion Review\n")
+        
+        # Original file information
+        print(f"ORIGINAL FILE: {original_path.name}")
+        print(f"  Path: {original_path}")
+        print(f"  Size: {original_info['size_formatted']} ({original_info['size']:,} bytes)")
+        
+        if original_info.get('bytes_per_sec_per_pixel') is not None:
+            print(f"  Bytes/sec/pixel: {original_info['bytes_per_sec_per_pixel']:.6f}")
+        else:
+            print(f"  Bytes/sec/pixel: N/A")
+        
+        print(f"  Streams: {len(original_info['streams'])}")
+        for stream_idx, stream in enumerate(original_info['streams'], 1):
+            print(f"    Stream {stream_idx}: {format_stream_info(stream)}")
+        
+        # Converted file information
+        print(f"\nCONVERTED FILE: {conversion_info['filename']}")
+        print(f"  Path: {converted_path}")
+        print(f"  Size: {conversion_info['size_formatted']} ({conversion_info['size']:,} bytes)")
+        
+        if conversion_info.get('bytes_per_sec_per_pixel') is not None:
+            print(f"  Bytes/sec/pixel: {conversion_info['bytes_per_sec_per_pixel']:.6f}")
+        else:
+            print(f"  Bytes/sec/pixel: N/A")
+        
+        if conversion_info['streams']:
+            print(f"  Streams: {len(conversion_info['streams'])}")
+            for stream_idx, stream in enumerate(conversion_info['streams'], 1):
+                print(f"    Stream {stream_idx}: {format_stream_info(stream)}")
+        
+        # Comparison
+        print("\nCOMPARISON:")
+        size_diff = conversion_info['size'] - original_info['size']
+        size_percent = (size_diff / original_info['size']) * 100 if original_info['size'] > 0 else 0
+        
+        if size_diff < 0:
+            print(f"  Size saved: {format_file_size(abs(size_diff))} ({abs(size_percent):.1f}% reduction)")
+        elif size_diff > 0:
+            print(f"  Size increased: {format_file_size(size_diff)} ({size_percent:.1f}% increase)")
+        else:
+            print(f"  Size unchanged")
+                
+        # User prompt
+        print("\n" + "-" * 80)
+        print("What would you like to do?")
+        print("  [o] Delete ORIGINAL file (keep converted)")
+        print("  [c] Delete CONVERTED file (keep original)")
+        print("  [b] Keep BOTH files")
+        print("  [q] Quit review (keep all remaining files)")
+        
+        while True:
+            try:
+                choice = input("\nYour choice [o/c/b/q]: ").strip().lower()
+                
+                if choice == 'o':
+                    try:
+                        original_path.unlink()
+                        print(f"✓ Deleted original file: {original_path.name}")
+                    except Exception as e:
+                        print(f"✗ Error deleting original file: {e}")
+                    break
+                elif choice == 'c':
+                    try:
+                        converted_path.unlink()
+                        print(f"✓ Deleted converted file: {conversion_info['filename']}")
+                    except Exception as e:
+                        print(f"✗ Error deleting converted file: {e}")
+                    break
+                elif choice == 'b':
+                    print(f"✓ Keeping both files")
+                    break
+                elif choice == 'q':
+                    print(f"\n✓ Exiting review. All remaining files will be kept.")
+                    return
+                else:
+                    print("Invalid choice. Please enter 'o', 'c', 'b', or 'q'.")
+            except EOFError:
+                print("\n✓ Input ended. Keeping all remaining files.")
+                return
+            except KeyboardInterrupt:
+                print("\n✓ Review interrupted. Keeping all remaining files.")
+                return
+        
+        print()
+    
+    print("=" * 80)
+    print("REVIEW COMPLETE")
+    print("=" * 80)
+
+
 def setup_and_parse_arguemts() -> argparse.Namespace:
     """Set up the argument parser for the script and return the parsed arguments."""
     parser = argparse.ArgumentParser(
@@ -684,6 +802,12 @@ Examples:
         type=str,
         metavar='DIR',
         help='Output directory for converted files (default: same directory as input file)'
+    )
+
+    parser.add_argument(
+        '--skip-review',
+        action='store_true',
+        help='Skip review after conversion (default: false)'
     )
     
     parser.add_argument(
@@ -779,22 +903,31 @@ def main():
     # Print results
     print_video_list(video_data, directory, sort_by=args.sort_by, reverse=args.reverse)
     
-    # Conversion phase (if requested)
-    if args.convert:
-        # Validate output directory if provided
-        output_dir = None
-        if args.output_dir:
-            output_dir = Path(args.output_dir)
-            if not output_dir.exists():
-                print(f"\nCreating output directory: {output_dir}")
-                output_dir.mkdir(parents=True, exist_ok=True)
-            elif not output_dir.is_dir():
-                print(f"Error: Output path '{args.output_dir}' exists but is not a directory.", 
-                      file=sys.stderr)
-                sys.exit(1)
-        
-        # Process conversions using the already-retrieved and sorted video data
-        process_conversions(video_data, output_dir, args.codec, args.preset, args.crf)
+    # Exit if no conversion requested
+    if not args.convert:
+        return
+    
+    # Validate output directory if provided
+    output_dir = None
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        if not output_dir.exists():
+            print(f"\nCreating output directory: {output_dir}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+        elif not output_dir.is_dir():
+            print(f"Error: Output path '{args.output_dir}' exists but is not a directory.", 
+                    file=sys.stderr)
+            sys.exit(1)
+    
+    # Process conversions
+    conversion_result = process_conversions(video_data, output_dir, args.codec, args.preset, args.crf)
+
+    if args.skip_review:
+        print("\nSkipping review.")
+        return
+    
+    # Review converted files
+    review_results(conversion_result)
 
 
 if __name__ == '__main__':
