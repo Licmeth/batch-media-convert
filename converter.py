@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Video file converter script that lists video files and their metadata.
+Video file listing script that displays video files and their metadata.
 Uses ffmpeg/ffprobe to extract media stream information.
 """
 
@@ -78,11 +78,12 @@ def get_video_info(file_path: Path) -> Dict[str, Any]:
     Returns:
         Dictionary containing file information and stream details
     """
+    file_size = get_file_size(file_path)
     info = {
         'filename': file_path.name,
         'path': str(file_path),
-        'size': get_file_size(file_path),
-        'size_formatted': format_file_size(get_file_size(file_path)),
+        'size': file_size,
+        'size_formatted': format_file_size(file_size),
         'streams': [],
         'error': None
     }
@@ -173,7 +174,12 @@ def print_video_list(video_files: List[Path], directory: Path):
     
     for idx, file_path in enumerate(video_files, 1):
         print(f"\n{idx}. {file_path.name}")
-        print(f"   Path: {file_path.relative_to(directory) if file_path.is_relative_to(directory) else file_path}")
+        # Try to show relative path, fallback to absolute path
+        try:
+            rel_path = file_path.relative_to(directory)
+            print(f"   Path: {rel_path}")
+        except ValueError:
+            print(f"   Path: {file_path}")
         
         info = get_video_info(file_path)
         
