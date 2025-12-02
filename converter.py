@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 
 # Common video file extensions
@@ -182,50 +182,114 @@ def format_stream_info(stream: Dict[str, Any]) -> str:
     return ', '.join(parts)
 
 
-def print_video_list(video_files: List[Path], directory: Path):
+def sort_video_data(
+    video_data: List[Tuple[Path, Dict[str, Any]]], 
+    sort_by: str = 'path', 
+    reverse: bool = False
+) -> List[Tuple[Path, Dict[str, Any]]]:
+    """
+    Sort video data by the specified metric.
+    
+    Args:
+        video_data: List of tuples containing (file_path, video_info)
+        sort_by: Metric to sort by ('path', 'size', or 'bps_per_pixel')
+        reverse: If True, reverse the sort order
+    
+    Returns:
+        Sorted list of tuples containing (file_path, video_info)
+    """
+    if sort_by == 'size':
+        video_data.sort(key=lambda x: x[1]['size'], reverse=reverse)
+    elif sort_by == 'bps_per_pixel':
+        # Files without bytes_per_sec_per_pixel will be sorted to the end
+        video_data.sort(
+            key=lambda x: (x[1]['bytes_per_sec_per_pixel'] is None, 
+                          x[1]['bytes_per_sec_per_pixel'] or 0),
+            reverse=reverse
+        )
+    else:  # sort by path (default)
+        video_data.sort(key=lambda x: str(x[0]), reverse=reverse)
+    
+    return video_data
+
+
+def print_video_entry(
+    file_path: Path, 
+    info: Dict[str, Any], 
+    directory: Path, 
+    idx: int
+) -> None:
+    """
+    Print a single video file entry with its metadata.
+    
+    Args:
+        file_path: Path to the video file
+        info: Video information dictionary
+        directory: Base directory being scanned
+        idx: Index number for display
+    """
+    print(f"\n{idx}. {file_path.name}")
+    # Try to show relative path, fallback to absolute path
+    try:
+        rel_path = file_path.relative_to(directory)
+        print(f"   Path: {rel_path}")
+    except ValueError:
+        print(f"   Path: {file_path}")
+    
+    print(f"   Size: {info['size_formatted']} ({info['size']:,} bytes)")
+    
+    if info['error']:
+        print(f"   Error: {info['error']}")
+    elif info['streams']:
+        # Display bytes per second per pixel if available
+        if info['bytes_per_sec_per_pixel'] is not None:
+            print(f"   Bytes/sec/pixel: {info['bytes_per_sec_per_pixel']:.6f}")
+        elif info['duration'] is None:
+            print(f"   Bytes/sec/pixel: N/A (duration not available)")
+        else:
+            print(f"   Bytes/sec/pixel: N/A")
+        
+        print(f"   Streams: {len(info['streams'])}")
+        for stream_idx, stream in enumerate(info['streams'], 1):
+            print(f"      Stream {stream_idx}: {format_stream_info(stream)}")
+    else:
+        print("   No stream information available")
+
+
+def print_video_list(
+    video_files: List[Path], 
+    directory: Path, 
+    sort_by: str = 'path', 
+    reverse: bool = False
+) -> None:
     """
     Print information about video files.
     
     Args:
         video_files: List of video file paths
         directory: Base directory being scanned
+        sort_by: Metric to sort by ('path', 'size', or 'bps_per_pixel')
+        reverse: If True, reverse the sort order
     """
     if not video_files:
         print("No video files found.")
         return
     
-    print(f"\nFound {len(video_files)} video file(s):\n")
+    print(f"\nFound {len(video_files)} video file(s), sorted by {sort_by}{' (reversed)' if reverse else ''}:\n")
     print("=" * 80)
     
-    for idx, file_path in enumerate(video_files, 1):
-        print(f"\n{idx}. {file_path.name}")
-        # Try to show relative path, fallback to absolute path
-        try:
-            rel_path = file_path.relative_to(directory)
-            print(f"   Path: {rel_path}")
-        except ValueError:
-            print(f"   Path: {file_path}")
-        
+    # Get video info for all files first (needed for sorting)
+    video_data: List[Tuple[Path, Dict[str, Any]]] = []
+    for file_path in video_files:
         info = get_video_info(file_path)
-        
-        print(f"   Size: {info['size_formatted']} ({info['size']:,} bytes)")
-        
-        if info['error']:
-            print(f"   Error: {info['error']}")
-        elif info['streams']:
-            # Display bytes per second per pixel if available
-            if info['bytes_per_sec_per_pixel'] is not None:
-                print(f"   Bytes/sec/pixel: {info['bytes_per_sec_per_pixel']:.6f}")
-            elif info['duration'] is None:
-                print(f"   Bytes/sec/pixel: N/A (duration not available)")
-            else:
-                print(f"   Bytes/sec/pixel: N/A")
-            
-            print(f"   Streams: {len(info['streams'])}")
-            for stream_idx, stream in enumerate(info['streams'], 1):
-                print(f"      Stream {stream_idx}: {format_stream_info(stream)}")
-        else:
-            print("   No stream information available")
+        video_data.append((file_path, info))
+    
+    # Sort the video data
+    video_data = sort_video_data(video_data, sort_by, reverse)
+    
+    # Print each video entry
+    for idx, (file_path, info) in enumerate(video_data, 1):
+        print_video_entry(file_path, info, directory, idx)
     
     print("\n" + "=" * 80)
 
@@ -239,6 +303,8 @@ def main():
 Examples:
   python3 converter.py /path/to/videos
   python3 converter.py -r /path/to/videos
+  python3 converter.py -s size /path/to/videos
+  python3 converter.py -s bps_per_pixel --reverse /path/to/videos
         """
     )
     
@@ -247,6 +313,20 @@ Examples:
         '--recursive',
         action='store_true',
         help='Scan directories recursively'
+    )
+    
+    parser.add_argument(
+        '-s',
+        '--sort-by',
+        choices=['path', 'size', 'bps_per_pixel'],
+        default='path',
+        help='Sort output by: path (default), size, or bps_per_pixel (bytes per second per pixel)'
+    )
+    
+    parser.add_argument(
+        '--reverse',
+        action='store_true',
+        help='Reverse the sort order'
     )
     
     parser.add_argument(
@@ -275,7 +355,7 @@ Examples:
     video_files = get_video_files(directory, args.recursive)
     
     # Print results
-    print_video_list(video_files, directory)
+    print_video_list(video_files, directory, sort_by=args.sort_by, reverse=args.reverse)
 
 
 if __name__ == '__main__':
