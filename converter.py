@@ -85,6 +85,8 @@ def get_video_info(file_path: Path) -> Dict[str, Any]:
         'size': file_size,
         'size_formatted': format_file_size(file_size),
         'streams': [],
+        'duration': None,
+        'bytes_per_sec_per_pixel': None,
         'error': None
     }
     
@@ -109,6 +111,7 @@ def get_video_info(file_path: Path) -> Dict[str, Any]:
             data = json.loads(result.stdout)
             
             # Extract stream information
+            first_video_stream = None
             for stream in data.get('streams', []):
                 stream_info = {
                     'type': stream.get('codec_type', 'unknown'),
@@ -120,11 +123,33 @@ def get_video_info(file_path: Path) -> Dict[str, Any]:
                     stream_info['width'] = stream.get('width')
                     stream_info['height'] = stream.get('height')
                     stream_info['fps'] = stream.get('r_frame_rate', 'unknown')
+                    stream_info['duration'] = stream.get('duration')
+                    
+                    # Store first video stream for bytes per second per pixel calculation
+                    if first_video_stream is None:
+                        first_video_stream = stream
                 elif stream.get('codec_type') == 'audio':
                     stream_info['sample_rate'] = stream.get('sample_rate')
                     stream_info['channels'] = stream.get('channels')
                 
                 info['streams'].append(stream_info)
+            
+            # Calculate bytes per second per pixel for first video stream
+            if first_video_stream:
+                duration = first_video_stream.get('duration')
+                width = first_video_stream.get('width')
+                height = first_video_stream.get('height')
+                
+                if duration and width and height:
+                    try:
+                        duration_float = float(duration)
+                        total_pixels = width * height
+                        if duration_float > 0 and total_pixels > 0:
+                            bytes_per_sec = file_size / duration_float
+                            info['bytes_per_sec_per_pixel'] = bytes_per_sec / total_pixels
+                            info['duration'] = duration_float
+                    except (ValueError, ZeroDivisionError):
+                        pass
         else:
             info['error'] = f"ffprobe failed: {result.stderr}"
     
@@ -188,6 +213,14 @@ def print_video_list(video_files: List[Path], directory: Path):
         if info['error']:
             print(f"   Error: {info['error']}")
         elif info['streams']:
+            # Display bytes per second per pixel if available
+            if info['bytes_per_sec_per_pixel'] is not None:
+                print(f"   Bytes/sec/pixel: {info['bytes_per_sec_per_pixel']:.6f}")
+            elif info['duration'] is None:
+                print(f"   Bytes/sec/pixel: N/A (duration not available)")
+            else:
+                print(f"   Bytes/sec/pixel: N/A")
+            
             print(f"   Streams: {len(info['streams'])}")
             for stream_idx, stream in enumerate(info['streams'], 1):
                 print(f"      Stream {stream_idx}: {format_stream_info(stream)}")
