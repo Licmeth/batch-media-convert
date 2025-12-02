@@ -623,20 +623,25 @@ def process_conversions(
 
 def delete_file(file_path: Path, additional_info: str) -> bool:
     """Move a file to trash (or delete if trash not available) and return True if successful, False otherwise."""
-    try:
-        if TRASH_AVAILABLE:
-            # Ensure we use absolute path for send2trash (required on Linux)
-            absolute_path = file_path.resolve()
+    # Ensure we use absolute path
+    absolute_path = file_path.resolve()
+
+    if TRASH_AVAILABLE:
+        try:
             send2trash(str(absolute_path))
             print(f"✓ Moved to trash: {file_path.name} ({additional_info})")
-        else:
-            file_path.unlink()
-            print(f"✓ Deleted file: {file_path.name} ({additional_info})")
-            print(f"   Note: Install 'send2trash' to move files to trash instead of permanent deletion")
+            return True
+        except Exception as e:
+            print(f"✗ Error moving file to trash {file_path.name} ({additional_info}): {e}")
+            print("Falling back to permanent deletion.")
+    
+    # Fallback to permanent deletion
+    try:
+        file_path.unlink()
+        print(f"✓ Deleted file: {file_path.name} ({additional_info})")
         return True
     except Exception as e:
-        action = "moving to trash" if TRASH_AVAILABLE else "deleting"
-        print(f"✗ Error {action} file {file_path.name} ({additional_info}): {e}")
+        print(f"✗ Error deleting file {file_path.name} ({additional_info}): {e}")
         return False
 
 
