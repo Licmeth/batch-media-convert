@@ -6,11 +6,10 @@ Uses ffmpeg/ffprobe to extract media stream information.
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Set, Optional
+from typing import List, Dict, Any, Tuple, Set
 
 
 # Common video file extensions
