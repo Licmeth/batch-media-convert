@@ -327,12 +327,13 @@ def print_video_list(
     print("\n" + "=" * 80)
 
 
-def should_convert_file(info: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+def should_convert_file(info: Dict[str, Any], target_codec: str = 'h265') -> Tuple[bool, Optional[str]]:
     """
-    Determine if a video file qualifies for conversion to h265.
+    Determine if a video file qualifies for conversion to the target codec.
     
     Args:
         info: Video information dictionary from get_video_info()
+        target_codec: Target codec ('h264' or 'h265')
     
     Returns:
         Tuple of (should_convert: bool, reason: str or None)
@@ -350,11 +351,13 @@ def should_convert_file(info: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     if not video_streams:
         return False, "No video streams found"
     
-    # Check if any video stream is already h265/hevc
+    # Check if any video stream is already using the target codec
     for stream in video_streams:
         codec = stream.get('codec', '').lower()
-        if codec in ['hevc', 'h265']:
+        if target_codec == 'h265' and codec in ['hevc', 'h265']:
             return False, f"Already using h265/hevc codec"
+        elif target_codec == 'h264' and codec in ['h264', 'avc']:
+            return False, f"Already using h264/avc codec"
     
     # File qualifies for conversion
     return True, None
@@ -400,37 +403,52 @@ def parse_ffmpeg_progress(line: str) -> Optional[Dict[str, Any]]:
     return progress if progress else None
 
 
-def convert_to_h265(
+def convert_to_h26x(
     input_path: Path,
     output_path: Path,
-    info: Dict[str, Any]
+    info: Dict[str, Any],
+    codec: str,
+    preset: str,
+    crf: int,
 ) -> Tuple[bool, str]:
     """
-    Convert a video file to h265 in MKV container with progress reporting.
+    Convert a video file to h264 or h265 in MKV container with progress reporting.
     
     Args:
         input_path: Path to input video file
         output_path: Path to output MKV file
         info: Video information dictionary (for duration)
+        codec: Target codec ('h264' or 'h265')
+        preset: Encoding preset (ultrafast to veryslow)
+        crf: Constant Rate Factor (1-51, lower is better quality)
     
     Returns:
         Tuple of (success: bool, message: str)
     """
+    # Map codec names to ffmpeg library names
+    codec_map = {
+        'h264': 'libx264',
+        'h265': 'libx265'
+    }
+    ffmpeg_codec = codec_map.get(codec, 'libx265')
+    
     # Build ffmpeg command
     # -i: input file
     # -map 0: copy all streams from input
     # -c copy: copy all streams by default
-    # -c:v libx265: re-encode video streams to h265
-    # -preset medium: encoding speed/quality tradeoff
-    # -crf 23: constant rate factor (quality, 23 is default)
+    # -c:v: re-encode video streams to target codec
+    # -preset: encoding speed/quality tradeoff
+    # -crf: constant rate factor (quality level)
+    # -hwaccel auto: use hardware acceleration if available
     cmd = [
         'ffmpeg',
         '-i', str(input_path),
-        '-map', '0',  # Map all streams
-        '-c', 'copy',  # Copy all streams by default
-        '-c:v', 'libx265',  # Re-encode video to h265
-        '-preset', 'medium',
-        '-crf', '23',
+        '-map', '0',  # Map all streams from input
+        '-c', 'copy',  # Copy streams
+        '-c:v', ffmpeg_codec,  # Re-encode video
+        '-preset', preset, # Encoding preset
+        '-crf', str(crf), # Quality setting
+        '-hwaccel', 'auto',  # Use hardware acceleration if available
         '-y',  # Overwrite output file if it exists
         str(output_path)
     ]
@@ -499,7 +517,10 @@ def convert_to_h265(
 
 def process_conversions(
     video_data: List[Tuple[Path, Dict[str, Any]]],
-    output_dir: Optional[Path] = None
+    output_dir: Optional[Path] = None,
+    codec: str = 'h265',
+    preset: str = 'slow',
+    crf: int = 21
 ) -> Dict[str, int]:
     """
     Process conversions for all qualified video files.
@@ -507,6 +528,9 @@ def process_conversions(
     Args:
         video_data: List of tuples containing (file_path, video_info)
         output_dir: Directory to save converted files (default: same as input)
+        codec: Target codec ('h264' or 'h265')
+        preset: Encoding preset (ultrafast to veryslow)
+        crf: Constant Rate Factor (1-51)
     
     Returns:
         Dictionary with conversion statistics
@@ -521,13 +545,14 @@ def process_conversions(
     
     print("\n" + "=" * 80)
     print("CONVERSION PHASE")
+    print(f"Codec: {codec.upper()}, Preset: {preset}, CRF: {crf}")
     print("=" * 80)
     
     for idx, (file_path, info) in enumerate(video_data, 1):
         print(f"\n{idx}. {file_path.name}")
         
         # Check if file qualifies for conversion
-        should_convert, reason = should_convert_file(info)
+        should_convert, reason = should_convert_file(info, codec)
         
         if not should_convert:
             print(f"   Skipped: {reason}")
@@ -539,9 +564,9 @@ def process_conversions(
         
         # Determine output path
         if output_dir:
-            output_path = output_dir / f"{file_path.stem}_h265.mkv"
+            output_path = output_dir / f"{file_path.stem}_{codec}.mkv"
         else:
-            output_path = file_path.parent / f"{file_path.stem}_h265.mkv"
+            output_path = file_path.parent / f"{file_path.stem}_{codec}.mkv"
         
         # Check if output already exists
         if output_path.exists():
@@ -550,7 +575,7 @@ def process_conversions(
             continue
         
         # Perform conversion
-        success, message = convert_to_h265(file_path, output_path, info)
+        success, message = convert_to_h26x(file_path, output_path, info, codec, preset, crf)
         
         if success:
             print(f"   {message}")
@@ -643,12 +668,39 @@ Examples:
     )
     
     parser.add_argument(
+        '--codec',
+        choices=['h264', 'h265'],
+        default='h265',
+        help='Video codec to use for conversion: h264 or h265 (default: h265)'
+    )
+    
+    parser.add_argument(
+        '--preset',
+        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
+        default='slow',
+        help='Encoding preset (speed/quality tradeoff). Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow (default: medium)'
+    )
+    
+    parser.add_argument(
+        '--crf',
+        type=int,
+        default=21,
+        metavar='VALUE',
+        help='Constant Rate Factor for quality (1-51, lower is better quality, default: 21)'
+    )
+    
+    parser.add_argument(
         'directory',
         type=str,
         help='Directory to scan for video files'
     )
 
-    return parser.parse_args()
+    # Validate CRF value
+    args = parser.parse_args()
+    if args.crf < 1 or args.crf > 51:
+        parser.error('CRF value must be between 1 and 51')
+    
+    return args
 
 
 def main():
@@ -723,7 +775,7 @@ def main():
                 sys.exit(1)
         
         # Process conversions using the already-retrieved and sorted video data
-        process_conversions(video_data, output_dir)
+        process_conversions(video_data, output_dir, args.codec, args.preset, args.crf)
 
 
 if __name__ == '__main__':
