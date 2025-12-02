@@ -419,6 +419,8 @@ def convert_to_h26x(
 ) -> Tuple[bool, str]:
     """
     Convert a video file to h264 or h265 in MKV container with progress reporting.
+
+    Data streams are ignored and not copied.
     
     Args:
         input_path: Path to input video file
@@ -440,16 +442,16 @@ def convert_to_h26x(
     
     # Build ffmpeg command
     # -i: input file
-    # -map 0: copy all streams from input
-    # -c copy: copy all streams by default
+    # -c:a: copy audio streams
+    # -c:s: copy subtitle streams
     # -c:v: re-encode video streams to target codec
     # -preset: encoding speed/quality tradeoff
     # -crf: constant rate factor (quality level)
     cmd = [
         'ffmpeg',
         '-i', str(input_path),
-        '-map', '0',  # Map all streams from input
-        '-c', 'copy',  # Copy streams
+        '-c:a', 'copy',  # Copy audio streams
+        '-c:s', 'copy',  # Copy subtitle streams
         '-c:v', ffmpeg_codec,  # Re-encode video
         '-preset', preset, # Encoding preset
         '-crf', str(crf), # Quality setting
@@ -481,8 +483,8 @@ def convert_to_h26x(
             if progress and 'time_seconds' in progress:
                 current_time = progress['time_seconds']
                 
-                # Update progress every 5 seconds of video time
-                if current_time - last_progress_time >= 5:
+                # Update progress every 2 seconds of video time
+                if current_time - last_progress_time >= 2:
                     last_progress_time = current_time
                     
                     if duration and duration > 0:
@@ -511,6 +513,8 @@ def convert_to_h26x(
             else:
                 return False, "Conversion completed but output file not found"
         else:
+            if output_path.exists():
+                delete_file(output_path, "incomplete output file after failed conversion")
             return False, f"FFmpeg exited with code {process.returncode}"
     
     except FileNotFoundError:
