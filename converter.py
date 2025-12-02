@@ -521,7 +521,7 @@ def process_conversions(
     codec: str = 'h265',
     preset: str = 'slow',
     crf: int = 21
-) -> Dict[str, int]:
+) -> List[Tuple[Path, Dict[str, Any], Dict[str, Any]]]:
     """
     Process conversions for all qualified video files.
     
@@ -533,7 +533,7 @@ def process_conversions(
         crf: Constant Rate Factor (1-51)
     
     Returns:
-        Dictionary with conversion statistics
+        List of tuples containing (file_path, video_info, conversion_info)
     """
     stats = {
         'total': len(video_data),
@@ -542,6 +542,8 @@ def process_conversions(
         'successful': 0,
         'failed': 0
     }
+
+    result = []
     
     print("\n" + "=" * 80)
     print("CONVERSION PHASE")
@@ -583,6 +585,23 @@ def process_conversions(
         else:
             print(f"   Failed: {message}")
             stats['failed'] += 1
+
+        output_info = get_video_info(output_path) if success else {}
+
+        conversion_info = {
+            'should_convert': should_convert,
+            'reason': reason,
+            'status': 'success' if success else 'failed',
+            'filename': output_path.name,
+            'path': str(output_path),
+            'size': output_info.get('size') if success else None,
+            'size_formatted': output_info.get('size_formatted') if success else None,
+            'streams': output_info.get('streams') if success else None,
+            'duration': output_info.get('duration') if success else None,
+            'bytes_per_sec_per_pixel': output_info.get('bytes_per_sec_per_pixel') if success else None,
+        }
+
+        result.append((file_path, info, conversion_info))
     
     # Print summary
     print("\n" + "=" * 80)
@@ -595,7 +614,7 @@ def process_conversions(
     print(f"Failed: {stats['failed']}")
     print("=" * 80)
     
-    return stats
+    return result
 
 
 def setup_and_parse_arguemts() -> argparse.Namespace:
