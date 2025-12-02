@@ -12,6 +12,12 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set, Optional
 
+try:
+    from send2trash import send2trash
+    TRASH_AVAILABLE = True
+except ImportError:
+    TRASH_AVAILABLE = False
+
 
 # Common video file extensions
 VIDEO_EXTENSIONS = {
@@ -439,7 +445,6 @@ def convert_to_h26x(
     # -c:v: re-encode video streams to target codec
     # -preset: encoding speed/quality tradeoff
     # -crf: constant rate factor (quality level)
-    # -hwaccel auto: use hardware acceleration if available
     cmd = [
         'ffmpeg',
         '-i', str(input_path),
@@ -448,7 +453,6 @@ def convert_to_h26x(
         '-c:v', ffmpeg_codec,  # Re-encode video
         '-preset', preset, # Encoding preset
         '-crf', str(crf), # Quality setting
-        '-hwaccel', 'auto',  # Use hardware acceleration if available
         '-y',  # Overwrite output file if it exists
         str(output_path)
     ]
@@ -520,7 +524,7 @@ def process_conversions(
     output_dir: Optional[Path] = None,
     codec: str = 'h265',
     preset: str = 'slow',
-    crf: int = 21
+    crf: int = 23
 ) -> List[Tuple[Path, Dict[str, Any], Dict[str, Any]]]:
     """
     Process conversions for all qualified video files.
@@ -617,6 +621,25 @@ def process_conversions(
     return result
 
 
+def delete_file(file_path: Path, additional_info: str) -> bool:
+    """Move a file to trash (or delete if trash not available) and return True if successful, False otherwise."""
+    try:
+        if TRASH_AVAILABLE:
+            # Ensure we use absolute path for send2trash (required on Linux)
+            absolute_path = file_path.resolve()
+            send2trash(str(absolute_path))
+            print(f"✓ Moved to trash: {file_path.name} ({additional_info})")
+        else:
+            file_path.unlink()
+            print(f"✓ Deleted file: {file_path.name} ({additional_info})")
+            print(f"   Note: Install 'send2trash' to move files to trash instead of permanent deletion")
+        return True
+    except Exception as e:
+        action = "moving to trash" if TRASH_AVAILABLE else "deleting"
+        print(f"✗ Error {action} file {file_path.name} ({additional_info}): {e}")
+        return False
+
+
 def review_results(conversion_results: List[Tuple[Path, Dict[str, Any], Dict[str, Any]]]) -> None:
     """
     Review conversion results and allow user to delete original or converted files.
@@ -639,6 +662,9 @@ def review_results(conversion_results: List[Tuple[Path, Dict[str, Any], Dict[str
     print("CONVERSION REVIEW")
     print("=" * 80)
     print(f"\nReviewing {len(successful_conversions)} successfully converted file(s).\n")
+
+    user_choice = None  # None, 'keep_original', 'keep_converted', 'keep_smaller', 'keep_both'
+    bytes_saved_total = 0
     
     for idx, (original_path, original_info, conversion_info) in enumerate(successful_conversions, 1):
         converted_path = Path(conversion_info['path'])
@@ -689,49 +715,71 @@ def review_results(conversion_results: List[Tuple[Path, Dict[str, Any], Dict[str
                 
         # User prompt
         print("\n" + "-" * 80)
-        print("What would you like to do?")
-        print("  [o] Delete ORIGINAL file (keep converted)")
-        print("  [c] Delete CONVERTED file (keep original)")
-        print("  [b] Keep BOTH files")
-        print("  [q] Quit review (keep all remaining files)")
+        if not user_choice:
+            print("What would you like to do?")
+            print("  [o] Keep only ORIGINAL file (delete converted)")
+            print("  [c] Keep only CONVERTED file (delete original)")
+            print("  [b] Keep BOTH files")
+            print("  [S] Keep SMALLER file for ALL remaining files")
+            print("  [O] Keep only ORIGINAL file for ALL remaining files")
+            print("  [C] Keep only CONVERTED file for ALL remaining files")
+            print("  [q] Quit review (keep all remaining files)")
         
         while True:
             try:
-                choice = input("\nYour choice [o/c/b/q]: ").strip().lower()
+                choice = ''
+                if not user_choice:
+                    choice = input("\nYour choice [o/c/b/S/O/C/q]: ").strip()
+
+                    if choice == 'O':
+                        user_choice = 'keep_original'
+                    elif choice == 'C':
+                        user_choice = 'keep_converted'
+                    elif choice == 'S':
+                        user_choice = 'keep_smaller'
+                    elif choice == 'q':
+                        user_choice = 'keep_both'
                 
-                if choice == 'o':
-                    try:
-                        original_path.unlink()
-                        print(f"✓ Deleted original file: {original_path.name}")
-                    except Exception as e:
-                        print(f"✗ Error deleting original file: {e}")
+                if choice.lower() == 'c' or user_choice == 'keep_converted':
+                    delete_file(original_path, "original file")
+                    bytes_saved_total += original_info['size'] - conversion_info['size']
                     break
-                elif choice == 'c':
-                    try:
-                        converted_path.unlink()
-                        print(f"✓ Deleted converted file: {conversion_info['filename']}")
-                    except Exception as e:
-                        print(f"✗ Error deleting converted file: {e}")
+                elif choice.lower() == 'o' or user_choice == 'keep_original':
+                    delete_file(converted_path, "converted file")
+                    bytes_saved_total += conversion_info['size'] - original_info['size']
                     break
-                elif choice == 'b':
+                elif choice.lower() == 's' or user_choice == 'keep_smaller':
+                    if conversion_info['size'] <= original_info['size']:
+                        delete_file(original_path, "original file, which is larger")
+                        bytes_saved_total += original_info['size'] - conversion_info['size']
+                    else:
+                        delete_file(converted_path, "converted file, which is larger")
+                        bytes_saved_total += conversion_info['size'] - original_info['size']
+                    break
+                elif choice.lower() == 'b' or user_choice == 'keep_both':
                     print(f"✓ Keeping both files")
+                    bytes_saved_total -= conversion_info['size']
                     break
-                elif choice == 'q':
-                    print(f"\n✓ Exiting review. All remaining files will be kept.")
-                    return
+                elif choice.lower() == 'q':
+                    print(f"\n✓ Exiting review. All remaining files are kept.")
+                    break
                 else:
-                    print("Invalid choice. Please enter 'o', 'c', 'b', or 'q'.")
+                    print("Invalid choice. Please enter 'o', 'c', 'b', 'S', 'O', 'C', or 'q'.")
             except EOFError:
-                print("\n✓ Input ended. Keeping all remaining files.")
+                print("\nError: Input ended. Keeping all remaining files.")
                 return
             except KeyboardInterrupt:
-                print("\n✓ Review interrupted. Keeping all remaining files.")
+                print("\nError: Review interrupted. Keeping all remaining files.")
                 return
         
         print()
     
     print("=" * 80)
     print("REVIEW COMPLETE")
+    if bytes_saved_total > 0:
+        print(f"\nTotal disk space saved: {format_file_size(bytes_saved_total)}")
+    else:
+        print(f"\nAdditional disk space used: {format_file_size(-bytes_saved_total)}")
     print("=" * 80)
 
 
@@ -821,15 +869,15 @@ Examples:
         '--preset',
         choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
         default='slow',
-        help='Encoding preset (speed/quality tradeoff). Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow (default: medium)'
+        help='Encoding preset (speed/quality tradeoff). Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow (default: slow)'
     )
     
     parser.add_argument(
         '--crf',
         type=int,
-        default=21,
+        default=23,
         metavar='VALUE',
-        help='Constant Rate Factor for quality (1-51, lower is better quality, default: 21)'
+        help='Constant Rate Factor for quality (1-51, lower is better quality, default: 23)'
     )
     
     parser.add_argument(
