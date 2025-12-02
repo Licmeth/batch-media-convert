@@ -308,8 +308,8 @@ def print_video_list(
     print("\n" + "=" * 80)
 
 
-def main():
-    """Main function to parse arguments and list video files."""
+def setup_and_parse_arguemts() -> argparse.Namespace:
+    """Set up the argument parser for the script and return the parsed arguments."""
     parser = argparse.ArgumentParser(
         description='List video files in a directory and display their metadata using ffmpeg.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -324,7 +324,7 @@ Examples:
   python3 converter.py /path/to/videos -i mp4,mkv -e mp4 -s bps_per_pixel
         """
     )
-    
+
     parser.add_argument(
         '-r',
         '--recursive',
@@ -367,9 +367,14 @@ Examples:
         type=str,
         help='Directory to scan for video files'
     )
-    
-    args = parser.parse_args()
-    
+
+    return parser.parse_args()
+
+
+def main():
+    """Main function to parse arguments and list video files."""
+    args = setup_and_parse_arguemts()
+
     # Process extensions
     extensions: Set[str] = VIDEO_EXTENSIONS
 
