@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Set, Optional
 
 
 # Common video file extensions
@@ -22,18 +22,32 @@ VIDEO_EXTENSIONS = {
 }
 
 
-def is_video_file(file_path: Path) -> bool:
-    """Check if a file is a video file based on its extension."""
-    return file_path.suffix.lower() in VIDEO_EXTENSIONS
+def is_video_file(file_path: Path, extensions: Set[str]) -> bool:
+    """Check if a file is a video file based on its extension.
+    
+    Args:
+        file_path: Path to the file to check
+        extensions: Set of video extensions to match (e.g., {'.mp4', '.avi'})
+    
+    Returns:
+        True if the file extension matches one of the provided extensions
+    """
+    ext = file_path.suffix.lower()
+    return ext in extensions
 
 
-def get_video_files(directory: Path, recursive: bool = False) -> List[Path]:
+def get_video_files(
+    directory: Path, 
+    recursive: bool = False, 
+    extensions: Set[str] = VIDEO_EXTENSIONS
+) -> List[Path]:
     """
     Get all video files in a directory.
     
     Args:
         directory: Path to the directory to scan
         recursive: If True, scan subdirectories recursively
+        extensions: Set of video extensions to match (defaults to VIDEO_EXTENSIONS)
     
     Returns:
         List of Path objects for video files
@@ -43,12 +57,12 @@ def get_video_files(directory: Path, recursive: bool = False) -> List[Path]:
     if recursive:
         # Use rglob for recursive search
         for file_path in directory.rglob('*'):
-            if file_path.is_file() and is_video_file(file_path):
+            if file_path.is_file() and is_video_file(file_path, extensions):
                 video_files.append(file_path)
     else:
         # Use glob for non-recursive search
         for file_path in directory.glob('*'):
-            if file_path.is_file() and is_video_file(file_path):
+            if file_path.is_file() and is_video_file(file_path, extensions):
                 video_files.append(file_path)
     
     return sorted(video_files)
@@ -302,9 +316,12 @@ def main():
         epilog="""
 Examples:
   python3 converter.py /path/to/videos
-  python3 converter.py -r /path/to/videos
-  python3 converter.py -s size /path/to/videos
-  python3 converter.py -s bps_per_pixel --reverse /path/to/videos
+  python3 converter.py /path/to/videos -r
+  python3 converter.py /path/to/videos -s size --reverse
+  python3 converter.py /path/to/videos -i .mp4,.avi
+  python3 converter.py /path/to/videos -i mp4,mkv,avi -r
+  python3 converter.py /path/to/videos -e .wmv,.flv
+  python3 converter.py /path/to/videos -i mp4,mkv -e mp4 -s bps_per_pixel
         """
     )
     
@@ -330,12 +347,53 @@ Examples:
     )
     
     parser.add_argument(
+        '-i',
+        '--include-ext',
+        type=str,
+        metavar='EXT1,EXT2,...',
+        help='Include only specific video extensions as comma-separated list (e.g., -i .mp4,.avi or -i mp4,avi).'
+    )
+
+    parser.add_argument(
+        '-e',
+        '--exclude-ext',
+        type=str,
+        metavar='EXT1,EXT2,...',
+        help='Exclude specific video extensions as comma-separated list (e.g., -e .mp4,.avi or -e mp4,avi).'
+    )
+    
+    parser.add_argument(
         'directory',
         type=str,
         help='Directory to scan for video files'
     )
     
     args = parser.parse_args()
+    
+    # Process extensions
+    extensions: Set[str] = VIDEO_EXTENSIONS
+
+    # Use only specific extensions if provided
+    if args.include_ext:
+        # Normalize extensions to lowercase and ensure they start with a dot
+        extensions = set()
+        for ext in args.include_ext.split(','):
+            ext = ext.strip().lower()
+            if not ext:
+                continue
+            if not ext.startswith('.'):
+                ext = '.' + ext
+            extensions.add(ext)
+    
+    # Exclude specific extensions if provided
+    if args.exclude_ext:
+        for ext in args.exclude_ext.split(','):
+            ext = ext.strip().lower()
+            if not ext:
+                continue
+            if not ext.startswith('.'):
+                ext = '.' + ext
+            extensions.discard(ext)
     
     # Convert directory to Path object and validate
     directory = Path(args.directory)
@@ -351,8 +409,13 @@ Examples:
     # Get video files
     mode = "recursive" if args.recursive else "non-recursive"
     print(f"Scanning directory '{directory}' ({mode} mode)...")
+    if args.include_ext:
+        print(f"Including only extensions: {', '.join(sorted(extensions))}")
+    if args.exclude_ext:
+        excluded_exts = [e.strip() for e in args.exclude_ext.split(',') if e.strip()]
+        print(f"Excluded extensions: {', '.join(excluded_exts)}")
     
-    video_files = get_video_files(directory, args.recursive)
+    video_files = get_video_files(directory, args.recursive, extensions)
     
     # Print results
     print_video_list(video_files, directory, sort_by=args.sort_by, reverse=args.reverse)
