@@ -6,10 +6,11 @@ Uses ffmpeg/ffprobe to extract media stream information.
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Set
+from typing import List, Dict, Any, Tuple, Set, Optional
 
 
 # Common video file extensions
@@ -226,6 +227,34 @@ def sort_video_data(
     return video_data
 
 
+def get_and_sort_video_data(
+    video_files: List[Path],
+    sort_by: str = 'path',
+    reverse: bool = False
+) -> List[Tuple[Path, Dict[str, Any]]]:
+    """
+    Get video information for all files and sort them.
+    
+    Args:
+        video_files: List of video file paths
+        sort_by: Metric to sort by ('path', 'size', or 'bps_per_pixel')
+        reverse: If True, reverse the sort order
+    
+    Returns:
+        List of tuples containing (file_path, video_info), sorted according to parameters
+    """
+    # Get video info for all files
+    video_data: List[Tuple[Path, Dict[str, Any]]] = []
+    for file_path in video_files:
+        info = get_video_info(file_path)
+        video_data.append((file_path, info))
+    
+    # Sort the video data
+    video_data = sort_video_data(video_data, sort_by, reverse)
+    
+    return video_data
+
+
 def print_video_entry(
     file_path: Path, 
     info: Dict[str, Any], 
@@ -270,41 +299,278 @@ def print_video_entry(
 
 
 def print_video_list(
-    video_files: List[Path], 
-    directory: Path, 
-    sort_by: str = 'path', 
+    video_data: List[Tuple[Path, Dict[str, Any]]],
+    directory: Path,
+    sort_by: str = 'path',
     reverse: bool = False
 ) -> None:
     """
     Print information about video files.
     
     Args:
-        video_files: List of video file paths
+        video_data: List of tuples containing (file_path, video_info), pre-sorted
         directory: Base directory being scanned
-        sort_by: Metric to sort by ('path', 'size', or 'bps_per_pixel')
-        reverse: If True, reverse the sort order
+        sort_by: Metric used for sorting (for display purposes)
+        reverse: Whether sort order was reversed (for display purposes)
     """
-    if not video_files:
+    if not video_data:
         print("No video files found.")
         return
     
-    print(f"\nFound {len(video_files)} video file(s), sorted by {sort_by}{' (reversed)' if reverse else ''}:\n")
+    print(f"\nFound {len(video_data)} video file(s), sorted by {sort_by}{' (reversed)' if reverse else ''}:\n")
     print("=" * 80)
-    
-    # Get video info for all files first (needed for sorting)
-    video_data: List[Tuple[Path, Dict[str, Any]]] = []
-    for file_path in video_files:
-        info = get_video_info(file_path)
-        video_data.append((file_path, info))
-    
-    # Sort the video data
-    video_data = sort_video_data(video_data, sort_by, reverse)
     
     # Print each video entry
     for idx, (file_path, info) in enumerate(video_data, 1):
         print_video_entry(file_path, info, directory, idx)
     
     print("\n" + "=" * 80)
+
+
+def should_convert_file(info: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """
+    Determine if a video file qualifies for conversion to h265.
+    
+    Args:
+        info: Video information dictionary from get_video_info()
+    
+    Returns:
+        Tuple of (should_convert: bool, reason: str or None)
+        If should_convert is True, reason is None.
+        If should_convert is False, reason explains why.
+    """
+    if info.get('error'):
+        return False, f"File has errors: {info['error']}"
+    
+    if not info.get('streams'):
+        return False, "No stream information available"
+    
+    # Check if there's at least one video stream
+    video_streams = [s for s in info['streams'] if s['type'] == 'video']
+    if not video_streams:
+        return False, "No video streams found"
+    
+    # Check if any video stream is already h265/hevc
+    for stream in video_streams:
+        codec = stream.get('codec', '').lower()
+        if codec in ['hevc', 'h265']:
+            return False, f"Already using h265/hevc codec"
+    
+    # File qualifies for conversion
+    return True, None
+
+
+def parse_ffmpeg_progress(line: str) -> Optional[Dict[str, Any]]:
+    """
+    Parse ffmpeg progress output line.
+    
+    Args:
+        line: Output line from ffmpeg stderr
+    
+    Returns:
+        Dictionary with progress information or None if not a progress line
+    """
+    # ffmpeg progress lines typically contain time=, frame=, fps=, etc.
+    if 'time=' not in line:
+        return None
+    
+    progress = {}
+    
+    # Extract time (format: HH:MM:SS.MS)
+    time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', line)
+    if time_match:
+        hours, minutes, seconds = time_match.groups()
+        progress['time_seconds'] = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    
+    # Extract frame count
+    frame_match = re.search(r'frame=\s*(\d+)', line)
+    if frame_match:
+        progress['frame'] = int(frame_match.group(1))
+    
+    # Extract fps
+    fps_match = re.search(r'fps=\s*([\d.]+)', line)
+    if fps_match:
+        progress['fps'] = float(fps_match.group(1))
+    
+    # Extract speed
+    speed_match = re.search(r'speed=\s*([\d.]+)x', line)
+    if speed_match:
+        progress['speed'] = float(speed_match.group(1))
+    
+    return progress if progress else None
+
+
+def convert_to_h265(
+    input_path: Path,
+    output_path: Path,
+    info: Dict[str, Any]
+) -> Tuple[bool, str]:
+    """
+    Convert a video file to h265 in MKV container with progress reporting.
+    
+    Args:
+        input_path: Path to input video file
+        output_path: Path to output MKV file
+        info: Video information dictionary (for duration)
+    
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    # Build ffmpeg command
+    # -i: input file
+    # -map 0: copy all streams from input
+    # -c copy: copy all streams by default
+    # -c:v libx265: re-encode video streams to h265
+    # -preset medium: encoding speed/quality tradeoff
+    # -crf 23: constant rate factor (quality, 23 is default)
+    cmd = [
+        'ffmpeg',
+        '-i', str(input_path),
+        '-map', '0',  # Map all streams
+        '-c', 'copy',  # Copy all streams by default
+        '-c:v', 'libx265',  # Re-encode video to h265
+        '-preset', 'medium',
+        '-crf', '23',
+        '-y',  # Overwrite output file if it exists
+        str(output_path)
+    ]
+    
+    try:
+        print(f"\n   Converting: {input_path.name}")
+        print(f"   Output: {output_path.name}")
+        print(f"   Command: {' '.join(cmd)}")
+        print(f"   Progress: ", end='', flush=True)
+        
+        # Start ffmpeg process
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            universal_newlines=True,
+            bufsize=1
+        )
+        
+        duration = info.get('duration')
+        last_progress_time = 0
+        
+        # Read output line by line
+        for line in process.stdout:
+            progress = parse_ffmpeg_progress(line)
+            if progress and 'time_seconds' in progress:
+                current_time = progress['time_seconds']
+                
+                # Update progress every 5 seconds of video time
+                if current_time - last_progress_time >= 5:
+                    last_progress_time = current_time
+                    
+                    if duration and duration > 0:
+                        percent = min(100, (current_time / duration) * 100)
+                        fps = progress.get('fps', 0)
+                        speed = progress.get('speed', 0)
+                        print(f"\r   Progress: {percent:.1f}% (fps: {fps:.1f}, speed: {speed:.2f}x)", 
+                              end='', flush=True)
+                    else:
+                        fps = progress.get('fps', 0)
+                        speed = progress.get('speed', 0)
+                        print(f"\r   Progress: {current_time:.1f}s (fps: {fps:.1f}, speed: {speed:.2f}x)", 
+                              end='', flush=True)
+        
+        # Wait for process to complete
+        process.wait()
+        
+        print()  # New line after progress
+        
+        if process.returncode == 0:
+            # Check if output file was created
+            if output_path.exists():
+                output_size = format_file_size(get_file_size(output_path))
+                input_size = format_file_size(info['size'])
+                return True, f"Success! Output: {output_size} (Input: {input_size})"
+            else:
+                return False, "Conversion completed but output file not found"
+        else:
+            return False, f"FFmpeg exited with code {process.returncode}"
+    
+    except FileNotFoundError:
+        return False, "ffmpeg not found - please install ffmpeg"
+    except Exception as e:
+        return False, f"Error during conversion: {str(e)}"
+
+
+def process_conversions(
+    video_data: List[Tuple[Path, Dict[str, Any]]],
+    output_dir: Optional[Path] = None
+) -> Dict[str, int]:
+    """
+    Process conversions for all qualified video files.
+    
+    Args:
+        video_data: List of tuples containing (file_path, video_info)
+        output_dir: Directory to save converted files (default: same as input)
+    
+    Returns:
+        Dictionary with conversion statistics
+    """
+    stats = {
+        'total': len(video_data),
+        'qualified': 0,
+        'skipped': 0,
+        'successful': 0,
+        'failed': 0
+    }
+    
+    print("\n" + "=" * 80)
+    print("CONVERSION PHASE")
+    print("=" * 80)
+    
+    for idx, (file_path, info) in enumerate(video_data, 1):
+        print(f"\n{idx}. {file_path.name}")
+        
+        # Check if file qualifies for conversion
+        should_convert, reason = should_convert_file(info)
+        
+        if not should_convert:
+            print(f"   Skipped: {reason}")
+            stats['skipped'] += 1
+            continue
+        
+        stats['qualified'] += 1
+        print(f"   Qualified for conversion")
+        
+        # Determine output path
+        if output_dir:
+            output_path = output_dir / f"{file_path.stem}_h265.mkv"
+        else:
+            output_path = file_path.parent / f"{file_path.stem}_h265.mkv"
+        
+        # Check if output already exists
+        if output_path.exists():
+            print(f"   Skipped: Output file already exists: {output_path.name}")
+            stats['skipped'] += 1
+            continue
+        
+        # Perform conversion
+        success, message = convert_to_h265(file_path, output_path, info)
+        
+        if success:
+            print(f"   {message}")
+            stats['successful'] += 1
+        else:
+            print(f"   Failed: {message}")
+            stats['failed'] += 1
+    
+    # Print summary
+    print("\n" + "=" * 80)
+    print("CONVERSION SUMMARY")
+    print("=" * 80)
+    print(f"Total files: {stats['total']}")
+    print(f"Qualified for conversion: {stats['qualified']}")
+    print(f"Skipped: {stats['skipped']}")
+    print(f"Successfully converted: {stats['successful']}")
+    print(f"Failed: {stats['failed']}")
+    print("=" * 80)
+    
+    return stats
 
 
 def setup_and_parse_arguemts() -> argparse.Namespace:
@@ -359,6 +625,21 @@ Examples:
         type=str,
         metavar='EXT1,EXT2,...',
         help='Exclude specific video extensions as comma-separated list (e.g., -e .mp4,.avi or -e mp4,avi).'
+    )
+    
+    parser.add_argument(
+        '-c',
+        '--convert',
+        action='store_true',
+        help='Convert qualified video files to h265 in MKV container after listing'
+    )
+    
+    parser.add_argument(
+        '-o',
+        '--output-dir',
+        type=str,
+        metavar='DIR',
+        help='Output directory for converted files (default: same directory as input file)'
     )
     
     parser.add_argument(
@@ -421,8 +702,28 @@ def main():
     
     video_files = get_video_files(directory, args.recursive, extensions)
     
+    # Get video info and sort (done once for both listing and conversion)
+    video_data = get_and_sort_video_data(video_files, sort_by=args.sort_by, reverse=args.reverse)
+    
     # Print results
-    print_video_list(video_files, directory, sort_by=args.sort_by, reverse=args.reverse)
+    print_video_list(video_data, directory, sort_by=args.sort_by, reverse=args.reverse)
+    
+    # Conversion phase (if requested)
+    if args.convert:
+        # Validate output directory if provided
+        output_dir = None
+        if args.output_dir:
+            output_dir = Path(args.output_dir)
+            if not output_dir.exists():
+                print(f"\nCreating output directory: {output_dir}")
+                output_dir.mkdir(parents=True, exist_ok=True)
+            elif not output_dir.is_dir():
+                print(f"Error: Output path '{args.output_dir}' exists but is not a directory.", 
+                      file=sys.stderr)
+                sys.exit(1)
+        
+        # Process conversions using the already-retrieved and sorted video data
+        process_conversions(video_data, output_dir)
 
 
 if __name__ == '__main__':
